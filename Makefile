@@ -10,10 +10,17 @@ EFFORT    ?=
 LLM_OPTS   = --workers $(WORKERS) $(if $(EFFORT),--effort $(EFFORT),)
 # Vector store selection for ingest/validate targets: all | hr | products
 STORE     ?= all
+# CRM & Support MCP server port on the host
+MCP_PORT  ?= 8765
+# Evaluation: number of golden questions (empty = EVAL_SAMPLE_SIZE) and GRAPH=1 to include the multi-agent graph
+SAMPLE    ?=
+GRAPH     ?=
 
 .DEFAULT_GOAL := help
 .PHONY: help setup generate generate-fast generate-template generate-hr generate-products refresh verify clean clean-cache \
-        ingest ingest-reset validate-stores validate-stores-offline clean-stores
+        ingest ingest-reset validate-stores validate-stores-offline clean-stores \
+        mcp-server-up mcp-server-down mcp-server-logs mcp-server-status mcp-seed-reset crm-seed \
+        sync-skills check-skills evaluate evaluate-fast graph-diagram clean-agent-state
 
 help: ## Show available targets
 	@uv run python -c "import re; [print(f'  {m[0]:<25} {m[1]}') for m in re.findall(r'^([a-z-]+):.*?## (.*)$$', open('Makefile').read(), re.M)]"
@@ -62,3 +69,40 @@ validate-stores-offline: ## Same as validate-stores without sample queries (no A
 
 clean-stores: ## Delete both Chroma databases (data/vectorstores)
 	uv run python -c "import shutil; shutil.rmtree('data/vectorstores', ignore_errors=True)"
+
+mcp-server-up: ## Build and start the CRM & Support MCP server in Docker (localhost only)
+	docker compose up -d --build crm-mcp
+	@echo "CRM & Support MCP server: http://localhost:$(MCP_PORT)/mcp   (logs: make mcp-server-logs)"
+
+mcp-server-down: ## Stop and remove the MCP server container (data in data/crm is kept)
+	docker compose down
+
+mcp-server-logs: ## Follow the MCP server logs (shows the colourful startup banner)
+	docker compose logs -f crm-mcp
+
+mcp-server-status: ## Check the MCP server /health endpoint
+	@uv run python -c "import urllib.request as u; print(u.urlopen('http://localhost:$(MCP_PORT)/health', timeout=3).read().decode())" || echo "MCP server is not reachable on port $(MCP_PORT)"
+
+mcp-seed-reset: ## Delete all CRM data in the running container and reload the seed
+	docker compose exec crm-mcp python -m mcp_servers.crm_support --reset-seed
+
+crm-seed: ## Regenerate the CRM seed JSON from the corpus catalog
+	uv run scripts/build_crm_seed.py
+
+sync-skills: ## Mirror src/skills to .claude/skills (Claude Code, Copilot) and .agents/skills (Codex, Copilot)
+	uv run scripts/sync_skills.py sync
+
+check-skills: ## Validate skill frontmatter and fail if the mirrors drifted from src/skills
+	uv run scripts/sync_skills.py check
+
+evaluate: ## Sampled evaluation of the RAG pipelines with the judge; e.g. make evaluate SAMPLE=10 GRAPH=1
+	uv run scripts/evaluate_rag.py $(if $(SAMPLE),--sample $(SAMPLE),) $(if $(GRAPH),--graph,)
+
+evaluate-fast: ## Retrieval-only evaluation (hit rate, MRR, golden match) without judge calls
+	uv run scripts/evaluate_rag.py --no-judge $(if $(SAMPLE),--sample $(SAMPLE),)
+
+graph-diagram: ## Export the Coordinator graph as Mermaid to docs/diagrams/coordinator_graph.mmd
+	uv run scripts/export_graph_diagram.py
+
+clean-agent-state: ## Delete short-term (checkpoints) and long-term (user facts) agent memory
+	uv run python -c "import shutil; shutil.rmtree('data/agent_state', ignore_errors=True)"

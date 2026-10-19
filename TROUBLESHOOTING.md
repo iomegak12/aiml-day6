@@ -131,3 +131,67 @@ Use `--skip-queries` (`make validate-stores-offline`). Only the sample queries n
 The golden Q&A is verified with `pypdf`. Other loaders (PyMuPDF, pdfplumber, Unstructured) may order table
 cells or join wrapped lines differently. This is a useful classroom discussion point, not a corpus bug. Normalise
 whitespace before comparing text.
+
+## Multi-agent RAG (src/agentic_rag)
+
+**The CRM agents are "UNAVAILABLE" in `service.roster()`**
+The CRM & Support MCP server is not reachable at `CRM_MCP_URL`. Start it with `make mcp-server-up` and check
+`make mcp-server-status`. The graph still works without it: the Coordinator plans only with the other agents and
+says that customer/ticket data is unavailable.
+
+**The Research agent is unavailable**
+`SERPER_API_KEY` is missing from `.env`.
+
+**`RuntimeError: This event loop is already running` / `await` outside a function**
+Use `await service.ask(...)` directly in a notebook cell (Jupyter supports top-level `await`). In a script, wrap
+the code in `async def main()` and call `asyncio.run(main())`.
+
+**A run "hangs" for 30-90 seconds**
+That is normal for multi-step questions: the Coordinator plans, reflects and writes at `high` reasoning effort and
+the judge reviews the answer. Pass `on_event=print` to `ask`/`resume` to watch progress. To speed up a class demo,
+set `COORDINATOR_REASONING_EFFORT=medium` or lower `MAX_AGENT_CALLS` / `JUDGE_MAX_RETRIES`.
+
+**The answer starts with "Low confidence"**
+The judge never scored an attempt at or above `JUDGE_PASS_SCORE` within `JUDGE_MAX_RETRIES` retries. Inspect
+`result.attempts` (scores, critique, targets). Very high pass marks (above about 95) are rarely reachable.
+
+**`status == "needs_approval"` or `"needs_clarification"` and no answer**
+The graph is paused at an interrupt. Answer it with `await service.resume(result.thread_id, value)`: the
+clarification text, or `"approve"` / `"reject"` / `{"decisions": [{"id": 0, "decision": "edit", "arguments": {...}}]}`.
+
+**"database is locked" from `data/agent_state`**
+Two processes write to the same SQLite checkpoint file at the same time (for example two notebooks). Run one at a
+time, or point one of them to another `AGENT_STATE_DIR`.
+
+**Stale memory makes answers odd (e.g. the wrong phone model is assumed)**
+Long-term facts are per `user_id`. Use `await service.forget("user-id")`, a new `user_id`, or
+`make clean-agent-state` to delete all memory.
+
+**`make check-skills` fails**
+A file under `.claude/skills` or `.agents/skills` was edited directly, or `src/skills` changed without a sync.
+Edit only `src/skills/`, then run `make sync-skills`. Frontmatter errors (`name` must match the folder,
+`description` at most 1024 characters) are reported with the skill name.
+
+## CRM & Support MCP server (Docker)
+
+**`make mcp-server-up` fails with "port is already allocated"**
+Another process uses port 8765. Set `MCP_PORT=8766` in `.env` (the URL `CRM_MCP_URL` must match) and retry.
+
+**`make mcp-server-status` says the server is not reachable**
+Check `docker compose ps` and `make mcp-server-logs`. The container prints a coloured banner with the endpoint,
+database path and record counts when it is ready.
+
+**The banner has no colours or wraps badly**
+Docker logs are coloured because the service has `tty: true` and `FORCE_COLOR=1`; some terminals strip ANSI
+codes. Use Windows Terminal or VS Code's terminal.
+
+**Tickets created in class are still there after a restart**
+That is intended: `./data/crm` is a bind mount. Run `make mcp-seed-reset` to restore the demo data.
+
+**`permission denied` on `data/crm` (Linux/macOS)**
+The container runs as a non-root user. Make the folder writable: `mkdir -p data/crm && chmod 777 data/crm`, or
+run the container with your UID.
+
+**Running the server without Docker**
+`uv sync --group crm-mcp` and `uv run python -m mcp_servers.crm_support` (add `--reset-seed` to reload the seed).
+It listens on `127.0.0.1:8765` by default.

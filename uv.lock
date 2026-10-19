@@ -14,6 +14,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
+    { name = "httpx" },
     { name = "langchain", extra = ["mcp"] },
     { name = "langchain-chroma" },
     { name = "langchain-core" },
@@ -24,13 +25,15 @@ dependencies = [
     { name = "openai" },
     { name = "pypdf" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "rank-bm25" },
     { name = "reportlab" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
 crm-mcp = [
-    { name = "fastmcp" },
+    { name = "fastmcp-slim", extra = ["server"] },
 ]
 dev = [
     { name = "ipykernel" },
@@ -41,6 +44,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "deepagents", specifier = ">=0.7.28" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", extras = ["mcp"], specifier = ">=1.4.6" },
     { name = "langchain-chroma", specifier = ">=1.1.0" },
     { name = "langchain-core", specifier = ">=1.6.12" },
@@ -51,12 +55,14 @@ requires-dist = [
     { name = "openai", specifier = ">=3.35.1" },
     { name = "pypdf", specifier = ">=6.21.1" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "reportlab", specifier = ">=5.0.1" },
+    { name = "rich", specifier = ">=15.0.0" },
 ]
 
 [package.metadata.requires-dev]
-crm-mcp = [{ name = "fastmcp", specifier = ">=4.1.1" }]
+crm-mcp = [{ name = "fastmcp-slim", extras = ["server"], specifier = ">=4.1.1" }]
 dev = [
     { name = "ipykernel", specifier = ">=7.4.0" },
     { name = "nbclient", specifier = ">=0.11.0" },

@@ -1,8 +1,17 @@
-# aiml-day6: Synthetic RAG Teaching Corpus
+# aiml-day6: From a Synthetic RAG Corpus to a Multi-Agent Assistant
 
-This project generates a realistic, **text-only PDF corpus** for teaching Retrieval-Augmented Generation (RAG).
-It contains product manuals for fictional TVs and phones and HR policies for a fictional Indian company. Each
-document has known answers, and the corpus has deliberate retrieval traps built in.
+This project is a complete teaching path for Retrieval-Augmented Generation (RAG) in three stages:
+
+1. **Corpus:** a realistic, **text-only PDF corpus** of product manuals for fictional TVs and phones and HR
+   policies for a fictional Indian company, with known answers and deliberate retrieval traps.
+2. **Pre-RAG:** chunking, metadata and embeddings into two persistent Chroma vector databases.
+3. **Multi-agent RAG:**
+   - A **LangGraph Coordinator** plans and dispatches **five specialist Deep Agents** in parallel.
+   - The agents answer with hybrid, advanced, multi-query and corrective RAG, the web, and a **CRM & Support MCP
+     server**.
+   - A **judge LLM** gates every answer.
+   - Short-term and long-term memory, plus human-in-the-loop approvals.
+   - See [Multi-agent RAG](#multi-agent-rag-coordinator-and-specialist-deep-agents).
 
 | Category | Documents | Pages each | Contents |
 |---|---|---|---|
@@ -268,6 +277,196 @@ The validation script's sample queries show the corpus traps in action:
 - **Exact codes.** "What does error code E-715 mean?" is weak for dense embeddings, which motivates hybrid
   BM25 + vector search.
 
+## Multi-agent RAG: Coordinator and specialist Deep Agents
+
+Instead of one bloated agent with every tool, a **Coordinator** built with LangGraph thinks hard (high reasoning
+effort). It plans the work, dispatches **specialists** in parallel, reflects on their reports and writes the answer.
+A separate **judge LLM** grades the answer before it reaches the user.
+
+```mermaid
+flowchart LR
+    user([Business user]) --> coord[Coordinator<br/>LangGraph, high effort]
+    coord -- parallel Send --> hr[HR Policy agent] & prod[Product Manuals agent] & cs[Customer Support agent] & tm[Ticket Management agent] & rs[Research agent]
+    hr --> hrdb[(Chroma hr_policies)]
+    prod --> pdb[(Chroma product_manuals)]
+    cs & tm --> mcp[CRM and Support MCP server<br/>FastMCP + SQLite in Docker]
+    rs --> web[[Serper web search]]
+    coord --> judge{{Judge LLM}}
+    coord <--> mem[(SQLite memory)]
+```
+
+Full diagrams (graph, sequences, approval flow, pipelines, skills) are in
+[docs/architecture/multi_agent_architecture.md](docs/architecture/multi_agent_architecture.md).
+
+### Quick start
+
+```bash
+uv sync                      # dependencies (includes deepagents, langgraph, langchain[mcp], rank-bm25)
+make generate-template       # corpus (or a hybrid generate), then:
+make ingest                  # two Chroma stores
+make mcp-server-up           # CRM & Support MCP server in Docker on http://localhost:8765/mcp
+make mcp-server-status       # {"status": "ok", "customers": 40, "tickets": 120}
+```
+
+Then open the notebooks in `notebooks/` with the project's `.venv` kernel. In Python:
+
+```python
+from agentic_rag.graph import CoordinatorService
+
+async with CoordinatorService.open() as service:
+    result = await service.ask("How many casual leave days do I get per year?", user_id="emp-42", on_event=print)
+    if result.status == "needs_approval":            # ticket writes wait for a human
+        result = await service.resume(result.thread_id, "approve")
+    print(result.answer)
+```
+
+### The team
+
+| Agent | Tools | Skills | Notes |
+|---|---|---|---|
+| **Coordinator** (LangGraph) | plans and dispatches agents; holds the MCP write tools | `coordination` | Plan, clarify, reflect, approve, synthesize, judge loop, long-term memory |
+| HR Policy | `hybrid_search`, `advanced_search`, `multi_query_search`, `corrective_search` on `hr` | `hr-policies`, `rag-answering` | Current policy version by default |
+| Product Manuals | same four tools on `products` | `product-support`, `rag-answering` | Always pins the exact model |
+| Customer Support | MCP `get_customer_profile`, `search_customer_profiles` | `customer-support` | Read-only |
+| Ticket Management | MCP `get_tickets_by_customer`, `search_tickets` | `ticket-management` | **Proposes** writes; never executes them |
+| Research | `web_search` (Serper) | `web-research` | Current, external information only |
+
+Each specialist is a Deep Agent (`create_deep_agent`):
+- It has only its own tools.
+- It has its own skills, mounted read-only.
+- It returns a structured **`AgentReport`**: findings, evidence with verbatim quotes, confidence, gaps and
+  proposed actions.
+
+### RAG patterns
+
+| Pattern | Where | What it does |
+|---|---|---|
+| Hybrid | `rag/hybrid_rag.py` | Metadata filter (model, document, version) + vector + BM25, fused with Reciprocal Rank Fusion |
+| Advanced | `rag/advanced.py` | LLM query rewrite, current versions only, 20 candidates, LLM rerank, token-budgeted context in reading order |
+| Multi-query | `rag/multi_query.py` | Splits a compound question, searches each part in parallel, fuses and keeps the top hits of every part |
+| Corrective | `rag/corrective.py` | Grades evidence; broadens, then switches store; says "I don't know"; checks the answer statement by statement |
+| Agentic | `graph/` | The Coordinator decides whether, where and when to search again (plan, reflect, replan, judge retry) |
+
+### Quality gate, interrupts and memory
+
+- **Judge.** `JUDGE_OPENAI_MODEL` (with `JUDGE_OPENAI_API_KEY`) scores four criteria:
+  - context relevance
+  - groundedness
+  - answer relevance
+  - completeness
+
+  Below `JUDGE_PASS_SCORE` (80), the critique goes back to the planner, which redoes only the weak parts. After
+  `JUDGE_MAX_RETRIES` (3), the best attempt is returned with a **low-confidence** notice.
+- **Interrupts.** The graph pauses for a **clarifying question** when the answer depends on facts nobody can look
+  up. It also pauses for **approval** of proposed ticket writes: approve, reject, or edit the arguments. The thread
+  resumes from its SQLite checkpoint, even after a restart.
+- **Memory.**
+  - *Short-term:* the conversation per `thread_id`, so follow-ups work.
+  - *Long-term:* facts per `user_id`, owned by the Coordinator, such as customer ID and products owned. These are
+    recalled on new threads.
+
+### CRM & Support MCP server
+
+`src/mcp_servers/crm_support` is a **FastMCP** server. It uses streamable HTTP at `/mcp` and a SQLite database
+(`CRM_DB_PATH`), seeded with 40 fictional customers and 120 tickets that reference the corpus models and error codes.
+
+| Kind | Items |
+|---|---|
+| Tools (read-only) | `get_customer_profile`, `search_customer_profiles`, `get_tickets_by_customer`, `search_tickets` (case-insensitive partial matching, paging) |
+| Tools (write) | `register_ticket`, `resolve_ticket` (no customer create, update or delete) |
+| Resources | `crm://customers/{id}`, `crm://customers/{id}/tickets`, `tickets://{id}`, `crm://schema`, `tickets://stats` |
+| Prompts | `triage_ticket(ticket_id)`, `customer_360_summary(customer_id)` |
+| Business rules | Inactive customers cannot raise tickets; only `open`/`in_progress` tickets can be resolved, and that needs `resolved_by` and remarks; enum validation; duplicate guard (similar open title) |
+
+Packaging:
+- A multi-stage, slim, non-root image (`Dockerfile`; no HEALTHCHECK by design) built with
+  `docker-compose.yml`.
+- The port is published on **127.0.0.1 only**, because the server has **no authentication** (see
+  [SECURITY.md](SECURITY.md)).
+- The startup banner (`make mcp-server-logs`) shows the endpoint, database, record counts and capabilities.
+
+| Make target | Purpose |
+|---|---|
+| `make mcp-server-up` / `mcp-server-down` | Build and start, or stop, the container (data in `data/crm/` persists) |
+| `make mcp-server-status` / `mcp-server-logs` | `/health` check / follow the coloured logs |
+| `make mcp-seed-reset` | Restore the demo data (removes tickets created in class) |
+| `make crm-seed` | Regenerate the seed JSON from the corpus catalogue |
+
+Any MCP client can use the server, for example a VS Code `mcp.json` entry with
+`{"type": "http", "url": "http://localhost:8765/mcp"}`.
+
+### Skills: one source, reused by Claude Code, Codex and Copilot
+
+`src/skills/` holds seven [Agent Skills](https://agentskills.io): `SKILL.md` with `name` and `description`
+frontmatter, plus optional scripts. The specialists load them through a read-only Deep Agents backend.
+`make sync-skills` copies them to the folders each coding assistant discovers.
+
+| Tool | Discovers skills in |
+|---|---|
+| Claude Code | `.claude/skills/` |
+| OpenAI Codex | `.agents/skills/` |
+| GitHub Copilot (VS Code / CLI / coding agent) | `.github/skills/`, `.claude/skills/` or `.agents/skills/` |
+
+**Recommendation:**
+- **Edit only `src/skills/`.** Run `make sync-skills` and commit the mirrors.
+- **Add `make check-skills` to CI or a pre-commit hook.** It fails on drift or invalid frontmatter.
+- **Do not add a third copy for Copilot.** Copilot already reads both mirrors.
+
+Copies are used instead of symlinks because symlinks need extra privileges on Windows.
+`hr-policies` and `product-support` include `scripts/search.py`, so a coding assistant can run the same RAG
+pipelines from the shell:
+
+```bash
+uv run python .claude/skills/product-support/scripts/search.py "E-715" --model "Lumina 55 Pro" --pipeline hybrid
+```
+
+### Scenario notebooks
+
+The notebooks contain use cases and code only. Run them to see the outputs.
+
+| Notebook | Scenario |
+|---|---|
+| `01_hr_policy_question` | Hybrid vs advanced RAG, the version trap, the judge, the graph |
+| `02_product_troubleshooting` | Model pinning, BM25 vs vectors for `E-715`, RRF, corrective RAG, a specialist report |
+| `03_customer_complaint_end_to_end` | Customer, then manual + tickets, then a proposed ticket, **approval**, and the ticket created via MCP |
+| `04_ticket_resolution_workflow` | Ticket search, then manual guidance, then `resolve_ticket` approved **with an edit** |
+| `05_mixed_multi_domain_question` | HR + product + tickets in one question, with **parallel** dispatch and a timeline |
+| `06_current_trends_question` | Research agent (Serper) next to the product catalogue |
+| `07_ambiguous_question_clarification` | Clarifying **interrupt**, then resume |
+| `08_follow_ups_and_memory` | Follow-ups on a thread; long-term facts recalled on a new thread |
+| `09_judge_retry_and_low_confidence` | Honest "I don't know"; forced retries and the low-confidence fallback |
+| `10_support_dashboard_mcp` | Raw MCP client: tools, resources, prompts, business-rule errors |
+| `11_context_engineering` | Token budgets, specialist context isolation, Coordinator digests |
+| `12_rag_patterns_evaluation` | Batch evaluation of the four pipelines and the graph |
+
+### Evaluation
+
+`make evaluate SAMPLE=10` runs a stratified sample of the golden Q&A through every pipeline and prints these metrics
+per pipeline:
+- `hit_rate` and `mrr`
+- `golden_match` (key facts of the golden answer appear in the answer)
+- judge mean and pass rate
+- latency
+
+Add `GRAPH=1` to include the full graph. `make evaluate-fast` skips the judge. Reports are written to `data/eval/`.
+
+### Settings (`.env`)
+
+| Key | Default | Purpose |
+|---|---|---|
+| `COORDINATOR_REASONING_EFFORT` | `high` | Coordinator plan, reflect and synthesize (`OPENAI_MODEL`) |
+| `OPENAI_FAST_MODEL`, `OPENAI_FAST_REASONING_EFFORT` | `gpt-5.1`, `low` | RAG steps, memory extraction; also the specialists' model |
+| `SPECIALIST_REASONING_EFFORT` | `low` | Specialist Deep Agents |
+| `MAX_REPLANS`, `MAX_AGENT_CALLS` | `2`, `8` | Graph budgets per question |
+| `JUDGE_OPENAI_MODEL`, `JUDGE_OPENAI_API_KEY`, `JUDGE_REASONING_EFFORT` | `gpt-5.5`, -, `low` | Judge model and key |
+| `JUDGE_PASS_SCORE`, `JUDGE_MAX_RETRIES` | `80`, `3` | Pass mark (0-100) and retries |
+| `RAG_TOP_K`, `RAG_CANDIDATE_K`, `RRF_K` | `6`, `20`, `60` | Context size, candidates per retriever, RRF constant |
+| `SERPER_API_KEY`, `SERPER_RESULTS` | -, `5` | Research agent |
+| `AGENT_STATE_DIR` | `data/agent_state` | SQLite checkpointer and long-term store |
+| `MCP_CONFIG_PATH`, `CRM_MCP_URL` | `config/mcp_servers.json`, `http://localhost:8765/mcp` | MCP servers used by the agents |
+| `CRM_DB_PATH`, `MCP_PORT`, `CRM_SEED_ON_START`, `MCP_LOG_LEVEL` | `data/crm/crm_support.db`, `8765`, `true`, `warning` | MCP server |
+| `EVAL_SAMPLE_SIZE` | `20` | Golden questions per evaluation |
+
 ## Project structure
 
 ```
@@ -297,6 +496,31 @@ src/data_ingestion/
   pipeline.py         parallel prepare + embed (INGEST_BATCH_SIZE), change detection, per-document replace
   validation.py       read-only summaries, cross-checks and sample queries
 docs/architecture/pre_rag_architecture.md   Mermaid architecture diagrams
+
+src/agentic_rag/                   multi-agent RAG
+  config.py           AgentSettings (models, efforts, judge, budgets, paths) from .env
+  llm.py              coordinator / specialist / fast / judge chat models (Responses API + reasoning effort)
+  retrieval/          stores, metadata filters (model, version), vector + MMR, BM25, hybrid RRF
+  rag/                steps (rewrite, decompose, grade, rerank, groundedness), context, answer,
+                      pipelines: hybrid_rag, advanced, multi_query, corrective
+  web/serper.py       Serper web and news search
+  agents/             AgentReport contract, Deep Agent builder, RAG tools, the five specialists, registry
+  graph/              state, prompts, nodes (plan ... save_memory), builder (+ Mermaid), service (ask/resume)
+  evaluation/         judge (scores, weighted overall), batch evaluation on the golden set
+  memory.py           AsyncSqliteSaver (thread) + AsyncSqliteStore (user facts)
+  mcp_client.py       MCP tool discovery and grouping (customer / ticket read / ticket write)
+  skills_sync.py      skill validation and mirroring
+src/mcp_servers/crm_support/       FastMCP server: config, models, db, rules, tools, resources, prompts,
+                                   seed (+ seed/seed_data.json), banner, server
+src/skills/                        7 Agent Skills (source of truth); mirrored to .claude/skills and .agents/skills
+config/mcp_servers.json            MCP servers used by the agents (${CRM_MCP_URL})
+notebooks/                         12 scenario notebooks (no outputs)
+scripts/sync_skills.py             sync | check
+scripts/evaluate_rag.py            sampled batch evaluation
+scripts/export_graph_diagram.py    Mermaid export of the compiled graph
+scripts/build_crm_seed.py          CRM seed JSON from the corpus catalogue
+Dockerfile, docker-compose.yml, .dockerignore   CRM & Support MCP server image (multi-stage, slim, non-root)
+docs/architecture/multi_agent_architecture.md   multi-agent diagrams and design notes
 ```
 
 **To add a product**, append a dict to `TVS` or `PHONES` in `catalog/products.py`, copying an existing entry.

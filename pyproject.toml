@@ -1,13 +1,14 @@
 [project]
 name = "aiml-day6"
 version = "0.1.0"
-description = "Synthetic RAG teaching corpus generator: product manuals and HR policies as text-only PDFs."
+description = "RAG teaching demos: synthetic PDF corpus, Chroma ingestion, and a multi-agent RAG system (LangGraph Coordinator, Deep Agents specialists, CRM MCP server)."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Ramkumar", email = "jd.ramkumar@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "deepagents>=0.7.28",
+    "httpx>=0.28.1",
     "langchain-chroma>=1.1.0",
     "langchain-core>=1.6.12",
     "langchain-openai>=1.7.2",
@@ -18,8 +19,10 @@ dependencies = [
     "openai>=3.35.1",
     "pypdf>=6.21.1",
     "python-dotenv>=1.2.4",
+    "pyyaml>=6.0.3",
     "rank-bm25>=0.2.2",
     "reportlab>=5.0.1",
+    "rich>=15.0.0",
 ]
 
 [build-system]
@@ -27,11 +30,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/data_generation", "src/data_ingestion"]
+packages = ["src/data_generation", "src/data_ingestion", "src/agentic_rag", "src/mcp_servers"]
 
 [dependency-groups]
 crm-mcp = [
-    "fastmcp>=4.1.1",
+    "fastmcp-slim[server]>=4.1.1",
 ]
 dev = [
     "ipykernel>=7.4.0",

@@ -19,3 +19,8 @@ data/cache/
 data/corpus/
 data/golden_qa/
 data/vectorstores/
+
+# Agent runtime state, evaluation reports and the CRM database (recreated on demand)
+data/agent_state/
+data/eval/
+data/crm/
